@@ -57,14 +57,6 @@ impl Value {
             // we're gonna assume the list is homogeneous. If it isn't this will draw something
             // wierd
             println!("<table>");
-            match value.as_list().next() {
-                Some(Value {
-                    name,
-                    kind: ValueKind::Map(map),
-                }) => println!("map {}", map),
-                Some(value) => println!("{}", value),
-                None => println!("None"),
-            }
             // inspect first element (look for map)
             if let Some(Value {
                 name: _name,
