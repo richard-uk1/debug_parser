@@ -57,6 +57,14 @@ impl Value {
             // we're gonna assume the list is homogeneous. If it isn't this will draw something
             // wierd
             println!("<table>");
+            match value.as_list().next() {
+                Some(Value {
+                    name,
+                    kind: ValueKind::Map(map),
+                }) => println!("map {}", map),
+                Some(value) => println!("{}", value),
+                None => println!("None"),
+            }
             // inspect first element (look for map)
             if let Some(Value {
                 name: _name,
@@ -347,10 +355,10 @@ impl fmt::Display for KeyValue {
 fn parse_ident(input: &str) -> IResult<&str, String> {
     let mut chrs = input.char_indices().peekable();
     match chrs.next() {
-        Some((_, ch)) if ch.is_alpha() => (),
+        Some((_, ch)) if ch.is_alpha() || ch == '_' => (),
         _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Alpha))),
     }
-    while matches!(chrs.peek(), Some((_, ch)) if ch.is_alphanumeric()) {
+    while matches!(chrs.peek(), Some((_, ch)) if ch.is_alphanumeric() || *ch == '_') {
         let _ = chrs.next();
     }
     match chrs.next() {
