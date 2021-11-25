@@ -6,7 +6,7 @@ use nom::{
 };
 use std::fmt;
 
-pub fn print_evcxr<T: fmt::Debug>(val: &T) {
+pub fn print_evcxr<T: fmt::Debug + ?Sized>(val: &T) {
     let val = format!("{:?}", val);
     parse(&val).to_evcxr()
 }
@@ -79,6 +79,11 @@ impl Value {
             }
 
             println!("</table>");
+        } else {
+            println!(
+                "<code>{}</code>",
+                html_escape::encode_text(&self.to_string())
+            );
         }
         println!("EVCXR_END_CONTENT");
     }
