@@ -1,190 +1,129 @@
+use anyhow::anyhow;
 use nom::{
     branch::alt,
     bytes::complete::tag,
+    character::complete::{i128, u128},
+    combinator::map,
     error::{make_error, Error, ErrorKind},
+    number::complete::double,
+    sequence::separated_pair,
     AsChar, IResult, Parser,
 };
 use std::fmt;
 
-pub fn print_evcxr<T: fmt::Debug + ?Sized>(val: &T) {
-    let val = format!("{:?}", val);
-    parse(&val).to_evcxr()
-}
+mod evcxr;
+mod parse_string;
 
-pub fn parse(input: &str) -> Value {
-    // cannot fail
-    Value::parse(input).expect("unreachable").1
+pub use self::evcxr::print_evcxr;
+use self::parse_string::parse_string;
+
+pub fn parse(input: &str) -> anyhow::Result<Value> {
+    let (rest, value) = Value::parse(input).map_err(|e| anyhow!("{:?}", e))?;
+    if !rest.is_empty() {
+        return Err(anyhow!(
+            "Failed to consume all of string!\nValue:\n{:?},\n\nRest:\n{:?}",
+            value,
+            rest
+        ));
+    }
+
+    Ok(value)
 }
 
 trait Parse: Sized {
     fn parse(input: &str) -> IResult<&str, Self>;
 }
 
-/// A parsed representation of debug output.
-pub struct Value {
-    pub name: Option<String>,
-    pub kind: ValueKind,
+/// The different kinds of values.
+///
+/// Destructure this to get at the value.
+pub enum Value {
+    Struct(Struct),
+    Set(Set),
+    Map(Map),
+    List(List),
+    Tuple(Tuple),
+    Term(Term),
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Value::Struct(v) => fmt::Debug::fmt(v, f),
+            Value::Set(v) => fmt::Debug::fmt(v, f),
+            Value::Map(v) => fmt::Debug::fmt(v, f),
+            Value::List(v) => fmt::Debug::fmt(v, f),
+            Value::Tuple(v) => fmt::Debug::fmt(v, f),
+            Value::Term(v) => fmt::Debug::fmt(v, f),
+        }
+    }
 }
 
 impl Parse for Value {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        let (input, name) = match parse_ident(input) {
-            Ok((i, n)) => (i, Some(n)),
-            Err(_) => (input, None),
-        };
-        let (input, kind) = ValueKind::parse(input);
-        Ok((input, Value { name, kind }))
+        alt((
+            (Struct::parse).map(Value::Struct),
+            (Map::parse).map(Value::Map), // try map before set (because set will match map)
+            (Set::parse).map(Value::Set),
+            (List::parse).map(Value::List),
+            (Tuple::parse).map(Value::Tuple),
+            (Term::parse).map(Value::Term),
+        ))(input)
     }
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if let Some(name) = self.name.as_ref() {
-            write!(f, "{} ", name)?;
-        }
-        fmt::Display::fmt(&self.kind, f)
-    }
+pub enum Term {
+    I128(i128),
+    U128(u128),
+    F64(f64),
+    Ident(String),
+    String(String),
 }
 
-impl Value {
-    pub fn to_evcxr(&self) {
-        println!("EVCXR_BEGIN_CONTENT text/html");
-        if let Some(name) = &self.name {
-            println!("<h5>{}</h5>", html_escape::encode_text(&name));
-        }
-        if let Some(value) = self.find_list(1) {
-            // we're gonna assume the list is homogeneous. If it isn't this will draw something
-            // wierd
-            println!("<table>");
-            // inspect first element (look for map)
-            if let Some(Value {
-                name: _name,
-                kind: ValueKind::Map(map),
-            }) = value.as_list().next()
-            {
-                println!("<thead><tr>");
-                // Use the keys as column headings
-                for key in map.values.iter().map(|v| &v.key) {
-                    println!("<th>{}</th>", html_escape::encode_text(&key.to_string()));
-                }
-                println!("</tr><thead>");
-            }
-            for row in value.as_list() {
-                println!("<tr>");
-                for cell in row.as_list() {
-                    println!("<td>{}</td>", html_escape::encode_text(&cell.to_string()));
-                }
-                println!("</tr>");
-            }
-
-            println!("</table>");
-        } else {
-            println!(
-                "<code>{}</code>",
-                html_escape::encode_text(&self.to_string())
-            );
-        }
-        println!("EVCXR_END_CONTENT");
-    }
-
-    /// Try to get a list from self. If nothing sensible is found, return None.
-    ///
-    /// The main job of this function is to recurse if the value contains a single element.
-    fn find_list(&self, recurse: u8) -> Option<&Value> {
-        match &self.kind {
-            ValueKind::List(_) => Some(self),
-            ValueKind::Set(set) => {
-                if set.values.len() == 1 && recurse > 0 {
-                    set.values[0].find_list(recurse - 1)
-                } else {
-                    Some(self)
-                }
-            }
-            ValueKind::Tuple(tuple) => {
-                if tuple.values.len() == 1 && recurse > 0 {
-                    tuple.values[0].find_list(recurse - 1)
-                } else {
-                    Some(self)
-                }
-            }
-            ValueKind::Map(map) => {
-                if map.values.len() == 1 && recurse > 0 {
-                    map.values[0].value.find_list(recurse - 1)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Return something sensible.
-    fn as_list(&self) -> impl Iterator<Item = &Value> {
-        enum Either<V1, V2, V3> {
-            V1(V1),
-            V2(V2),
-            V3(V3),
-        }
-
-        impl<T, V1: Iterator<Item = T>, V2: Iterator<Item = T>, V3: Iterator<Item = T>> Iterator
-            for Either<V1, V2, V3>
-        {
-            type Item = T;
-            fn next(&mut self) -> Option<Self::Item> {
-                match self {
-                    Either::V1(v) => v.next(),
-                    Either::V2(v) => v.next(),
-                    Either::V3(v) => v.next(),
-                }
-            }
-        }
-
-        match &self.kind {
-            ValueKind::List(list) => Either::V1(list.values.iter()),
-            ValueKind::Set(set) => Either::V1(set.values.iter()),
-            ValueKind::Tuple(tuple) => Either::V1(tuple.values.iter()),
-            ValueKind::Map(map) => Either::V2(map.values.iter().map(|v| &v.value)),
-            ValueKind::Term(_) => Either::V3(std::iter::once(self)),
-        }
-    }
-}
-
-/// The different kinds of values.
-///
-/// Destructure this to get at the value.
-pub enum ValueKind {
-    Set(Set),
-    Map(Map),
-    List(List),
-    Tuple(Tuple),
-    /// Something we couldn't parse any more.
-    Term(String),
-}
-
-impl fmt::Display for ValueKind {
+impl fmt::Debug for Term {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ValueKind::Set(v) => fmt::Display::fmt(v, f),
-            ValueKind::Map(v) => fmt::Display::fmt(v, f),
-            ValueKind::List(v) => fmt::Display::fmt(v, f),
-            ValueKind::Tuple(v) => fmt::Display::fmt(v, f),
-            ValueKind::Term(v) => fmt::Display::fmt(v, f),
+            Term::I128(v) => fmt::Debug::fmt(v, f),
+            Term::U128(v) => fmt::Debug::fmt(v, f),
+            Term::F64(v) => fmt::Debug::fmt(v, f),
+            // Idents are displayed without surrounding quotation marks.
+            Term::Ident(v) => fmt::Display::fmt(v, f),
+            Term::String(v) => fmt::Debug::fmt(v, f),
         }
     }
 }
 
-impl ValueKind {
-    fn parse(input: &str) -> (&str, Self) {
+impl Term {
+    fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
+        // If input parses as a double, we need to check if it would be parsable as
+        // an integer first. We don't want to parse "0" as a f64.
+        //
+        // But we also don't want to parse "12.2" as "12" because there's more
+        // information consumed when we parse it as a double.
+        if let Ok((rest, v)) = double::<_, ()>(input) {
+            if let Ok((other_rest, other_v)) = i128::<_, ()>(input) {
+                if other_rest.len() <= rest.len() {
+                    return Ok((other_rest, Term::I128(other_v)));
+                }
+            }
+
+            if let Ok((other_rest, other_v)) = u128::<_, ()>(input) {
+                if other_rest.len() <= rest.len() {
+                    return Ok((other_rest, Term::U128(other_v)));
+                }
+            }
+
+            return Ok((rest, Term::F64(v)));
+        }
+
         alt((
-            (Map::parse).map(ValueKind::Map), // try map before set (because set will match map)
-            (Set::parse).map(ValueKind::Set),
-            (List::parse).map(ValueKind::List),
-            (Tuple::parse).map(ValueKind::Tuple),
-            parse_any.map(ValueKind::Term),
+            map(i128, Term::I128),
+            map(u128, Term::U128),
+            map(parse_ident, Term::Ident),
+            map(parse_string, Term::String),
         ))(input)
-        .expect("unreachable")
     }
 }
 
@@ -205,17 +144,58 @@ impl Set {
     }
 }
 
-impl fmt::Display for Set {
+impl fmt::Debug for Set {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("{")?;
-        let mut iter = self.values.iter();
-        if let Some(v) = iter.next() {
-            fmt::Display::fmt(v, f)?;
+        f.debug_set().entries(self.values.iter()).finish()
+    }
+}
+
+pub struct Struct {
+    pub name: String,
+    pub values: Vec<IdentValue>,
+}
+
+impl Struct {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        let input = consume_ws(input);
+        let (input, name) = parse_ident(input)?;
+
+        let input = consume_ws(input);
+        let (input, _) = tag("{")(input)?;
+        // because we're gonna parse everything as a value (in the catch-all) we first need to
+        // separate out at the "}".
+        let (input, rest) =
+            split_on('}', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
+
+        let values = parse_comma_separated(input)?;
+        Ok((rest, Self { name, values }))
+    }
+}
+
+impl fmt::Debug for Struct {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut item = f.debug_struct(&self.name);
+        for v in &self.values {
+            item.field(&v.ident, &v.value);
         }
-        for v in iter {
-            write!(f, ", {}", v)?;
-        }
-        f.write_str("}")
+        item.finish()
+    }
+}
+
+pub struct IdentValue {
+    pub ident: String,
+    pub value: Value,
+}
+
+impl Parse for IdentValue {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        let input = consume_ws(input);
+        separated_pair(
+            parse_ident,
+            |s| tag(":")(consume_ws(s)),
+            |s| Value::parse(consume_ws(s)),
+        )(input)
+        .map(|(rest, (ident, value))| (rest, IdentValue { ident, value }))
     }
 }
 
@@ -236,17 +216,11 @@ impl Map {
     }
 }
 
-impl fmt::Display for Map {
+impl fmt::Debug for Map {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("{")?;
-        let mut iter = self.values.iter();
-        if let Some(v) = iter.next() {
-            fmt::Display::fmt(v, f)?;
-        }
-        for v in iter {
-            write!(f, ", {}", v)?;
-        }
-        f.write_str("}")
+        f.debug_map()
+            .entries(self.values.iter().map(|v| (&v.key, &v.value)))
+            .finish()
     }
 }
 
@@ -267,48 +241,42 @@ impl List {
     }
 }
 
-impl fmt::Display for List {
+impl fmt::Debug for List {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("[")?;
-        let mut iter = self.values.iter();
-        if let Some(v) = iter.next() {
-            fmt::Display::fmt(v, f)?;
-        }
-        for v in iter {
-            write!(f, ", {}", v)?;
-        }
-        f.write_str("]")
+        f.debug_list().entries(self.values.iter()).finish()
     }
 }
 
 pub struct Tuple {
+    pub name: Option<String>,
     pub values: Vec<Value>,
 }
 
 impl Tuple {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
+        let (input, name) = if let Ok((rest, name)) = parse_ident(input) {
+            (rest, Some(name))
+        } else {
+            (input, None)
+        };
         let (input, _) = tag("(")(input)?;
         // because we're gonna parse everything as a value (in the catch-all) we first need to
         // separate out at the "}".
         let (input, rest) =
             split_on(')', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
         let values = parse_comma_separated(input)?;
-        Ok((rest, Self { values }))
+        Ok((rest, Self { name, values }))
     }
 }
 
-impl fmt::Display for Tuple {
+impl fmt::Debug for Tuple {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("(")?;
-        let mut iter = self.values.iter();
-        if let Some(v) = iter.next() {
-            fmt::Display::fmt(v, f)?;
+        let mut tuple = f.debug_tuple(self.name.as_deref().unwrap_or(""));
+        for v in &self.values {
+            tuple.field(v);
         }
-        for v in iter {
-            write!(f, ", {}", v)?;
-        }
-        f.write_str(")")
+        tuple.finish()
     }
 }
 
@@ -325,26 +293,26 @@ fn parse_comma_separated<T: Parse>(mut input: &str) -> Result<Vec<T>, nom::Err<E
 }
 
 pub struct KeyValue {
-    pub key: String,
+    pub key: Value,
     pub value: Value,
 }
 
 impl Parse for KeyValue {
     fn parse(input: &str) -> IResult<&str, Self> {
-        let (key, value) =
-            split_on(':', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Tag)))?;
-        let (rest, key) = parse_ident(key.trim())?;
-        if !rest.is_empty() {
-            return Err(nom::Err::Error(make_error(input, ErrorKind::TooLarge)));
-        }
-        let (_, value) = Value::parse(value).unwrap();
-        Ok(("", Self { key, value }))
+        separated_pair(
+            Value::parse,
+            |s| tag(":")(consume_ws(s)),
+            |s| Value::parse(consume_ws(s)),
+        )(input)
+        .map(|(rest, (key, value))| (rest, KeyValue { key, value }))
     }
 }
 
-impl fmt::Display for KeyValue {
+impl fmt::Debug for KeyValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {}", self.key, self.value)
+        fmt::Debug::fmt(&self.key, f)?;
+        write!(f, ": ")?;
+        fmt::Debug::fmt(&self.value, f)
     }
 }
 
@@ -362,11 +330,6 @@ fn parse_ident(input: &str) -> IResult<&str, String> {
         Some((idx, _)) => Ok((&input[idx..], input[..idx].to_string())),
         None => Ok(("", input.to_string())),
     }
-}
-
-/// A function that parses any string by returning it (minus any trailing whitespace
-fn parse_any(input: &str) -> IResult<&str, String> {
-    Ok(("", input.trim_end().to_string()))
 }
 
 /// Finds the next `ch` in the input and splits on it.
@@ -423,14 +386,165 @@ fn consume_ws(input: &str) -> &str {
     ""
 }
 
-#[test]
-fn test_split_on() {
-    assert_eq!(split_on(',', "test,"), Some(("test", "")));
-    assert_eq!(split_on(',', "test"), None);
-    assert_eq!(split_on(')', "())"), Some(("()", "")));
-    assert_eq!(split_on('}', "{}}"), Some(("{}", "")));
-    assert_eq!(split_on(',', r#""str,""#), None);
-    assert_eq!(split_on(',', r#""str","#), Some((r#""str""#, "")));
-    assert_eq!(split_on(')', r#""(")"#), Some((r#""(""#, "")));
-    assert_eq!(split_on(',', "(,),)"), Some(("(,)", ")")));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_split_on() {
+        assert_eq!(split_on(',', "test,"), Some(("test", "")));
+        assert_eq!(split_on(',', "test"), None);
+        assert_eq!(split_on(')', "())"), Some(("()", "")));
+        assert_eq!(split_on('}', "{}}"), Some(("{}", "")));
+        assert_eq!(split_on(',', r#""str,""#), None);
+        assert_eq!(split_on(',', r#""str","#), Some((r#""str""#, "")));
+        assert_eq!(split_on(')', r#""(")"#), Some((r#""(""#, "")));
+        assert_eq!(split_on(',', "(,),)"), Some(("(,)", ")")));
+    }
+
+    #[track_caller]
+    fn assert_same_debug<T: std::fmt::Debug>(item: &T) {
+        let parsed = parse(&format!("{:?}", item)).expect("can parse");
+        assert_eq!(format!("{:#?}", parsed), format!("{:#?}", item));
+        assert_eq!(format!("{:?}", parsed), format!("{:?}", item));
+    }
+
+    #[test]
+    fn numbers() {
+        assert_same_debug(&0);
+        assert_same_debug(&2);
+        assert_same_debug(&-2);
+        assert_same_debug(&2.14);
+        assert_same_debug(&u128::MAX);
+        assert_same_debug(&i128::MAX);
+        assert_same_debug(&i128::MIN);
+        // Not supported.
+        // assert_same_debug(&f64::NEG_INFINITY);
+        // assert_same_debug(&f64::INFINITY);
+    }
+
+    #[test]
+    fn simple_types() {
+        assert_same_debug(&"Foo");
+        assert_same_debug(&vec!["Foo", "Bar", "Zed"]);
+        assert_same_debug(&{
+            let mut map = HashMap::new();
+            map.insert(2, "Foo");
+            map.insert(200, "Hello world");
+            map
+        });
+    }
+
+    #[test]
+    fn tuples() {
+        assert_same_debug(&("Foo", 32, -12.0));
+    }
+
+    #[test]
+    fn object_tuples() {
+        #[derive(Debug)]
+        struct Foo(&'static str, u32, f32);
+
+        assert_same_debug(&Foo("Foo", 32, -12.0));
+    }
+
+    #[test]
+    fn trivial_object() {
+        #[derive(Debug)]
+        struct Foo {
+            value: f32,
+        }
+
+        let item = Foo { value: 12.2 };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn object() {
+        #[derive(Debug)]
+        struct Foo {
+            value: f32,
+            bar: Vec<Bar>,
+        }
+
+        #[derive(Debug)]
+        struct Bar {
+            elo: i32,
+        }
+
+        let item = Foo {
+            value: 12.2,
+            bar: vec![Bar { elo: 200 }, Bar { elo: -12 }],
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn hashmap_with_object_values() {
+        #[derive(Debug)]
+        struct Foo {
+            value: f32,
+            bar: Vec<Bar>,
+        }
+
+        #[derive(Debug)]
+        struct Bar {
+            elo: i32,
+        }
+
+        let item = {
+            let mut map = HashMap::new();
+            map.insert(
+                "foo",
+                Foo {
+                    value: 12.2,
+                    bar: vec![Bar { elo: 200 }, Bar { elo: -12 }],
+                },
+            );
+            map.insert(
+                "foo2",
+                Foo {
+                    value: -0.2,
+                    bar: vec![],
+                },
+            );
+            map
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn hashmap_with_object_keys() {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct Foo {
+            value: i32,
+            bar: Vec<Bar>,
+        }
+
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct Bar {
+            elo: i32,
+        }
+
+        let item = {
+            let mut map = HashMap::new();
+            map.insert(
+                Foo {
+                    value: 12,
+                    bar: vec![Bar { elo: 200 }, Bar { elo: -12 }],
+                },
+                "foo",
+            );
+            map.insert(
+                Foo {
+                    value: -2,
+                    bar: vec![],
+                },
+                "foo2",
+            );
+            map
+        };
+        assert_same_debug(&item);
+    }
 }
