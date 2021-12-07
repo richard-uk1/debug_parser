@@ -13,4 +13,5 @@ version = "0.1.3"
 anyhow = "1.0"
 html-escape = "0.2.9"
 nom = "7.1.0"
+ordered-float = "2.8"
 #serde = { version = "1", features = ["derive"], optional = true }

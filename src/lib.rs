@@ -9,6 +9,7 @@ use nom::{
     sequence::separated_pair,
     AsChar, IResult, Parser,
 };
+use ordered_float::OrderedFloat;
 use std::fmt;
 
 mod evcxr;
@@ -37,6 +38,7 @@ trait Parse: Sized {
 /// The different kinds of values.
 ///
 /// Destructure this to get at the value.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
     Struct(Struct),
     Set(Set),
@@ -73,10 +75,11 @@ impl Parse for Value {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum Term {
     I128(i128),
     U128(u128),
-    F64(f64),
+    F64(OrderedFloat<f64>),
     Ident(String),
     String(String),
 }
@@ -86,7 +89,7 @@ impl fmt::Debug for Term {
         match self {
             Term::I128(v) => fmt::Debug::fmt(v, f),
             Term::U128(v) => fmt::Debug::fmt(v, f),
-            Term::F64(v) => fmt::Debug::fmt(v, f),
+            Term::F64(v) => fmt::Debug::fmt(&v.0, f),
             // Idents are displayed without surrounding quotation marks.
             Term::Ident(v) => fmt::Display::fmt(v, f),
             Term::String(v) => fmt::Debug::fmt(v, f),
@@ -115,7 +118,7 @@ impl Term {
                 }
             }
 
-            return Ok((rest, Term::F64(v)));
+            return Ok((rest, Term::F64(OrderedFloat(v))));
         }
 
         alt((
@@ -127,6 +130,7 @@ impl Term {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Set {
     pub values: Vec<Value>,
 }
@@ -150,6 +154,7 @@ impl fmt::Debug for Set {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Struct {
     pub name: String,
     pub values: Vec<IdentValue>,
@@ -182,6 +187,7 @@ impl fmt::Debug for Struct {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct IdentValue {
     pub ident: String,
     pub value: Value,
@@ -199,6 +205,7 @@ impl Parse for IdentValue {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Map {
     pub values: Vec<KeyValue>,
 }
@@ -224,6 +231,7 @@ impl fmt::Debug for Map {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct List {
     pub values: Vec<Value>,
 }
@@ -247,6 +255,7 @@ impl fmt::Debug for List {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tuple {
     pub name: Option<String>,
     pub values: Vec<Value>,
@@ -292,6 +301,7 @@ fn parse_comma_separated<T: Parse>(mut input: &str) -> Result<Vec<T>, nom::Err<E
     Ok(out)
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyValue {
     pub key: Value,
     pub value: Value,
