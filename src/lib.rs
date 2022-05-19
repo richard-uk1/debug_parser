@@ -2,15 +2,13 @@ use anyhow::anyhow;
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, alphanumeric1, i128, multispace0, u128},
+    character::complete::{alpha1, alphanumeric1, multispace0, none_of},
     combinator::{map, recognize},
     error::{Error, ParseError},
-    multi::{many0_count, separated_list0},
-    number::complete::double,
+    multi::{many0_count, many1, separated_list0},
     sequence::{delimited, pair, separated_pair},
     IResult, Parser,
 };
-use ordered_float::OrderedFloat;
 use std::fmt;
 
 mod evcxr;
@@ -23,7 +21,7 @@ pub fn parse(input: &str) -> anyhow::Result<Value> {
     let (rest, value) = Value::parse(input).map_err(|e| anyhow!("{:?}", e))?;
     if !rest.is_empty() {
         return Err(anyhow!(
-            "Failed to consume all of string!\nValue:\n{:?},\n\nRest:\n{:?}",
+            "Failed to consume all of string!\nValue:\n{:?}\n\nRest:\n{:?}",
             value,
             rest
         ));
@@ -78,22 +76,23 @@ impl Parse for Value {
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub enum Term {
-    I128(i128),
-    U128(u128),
-    F64(OrderedFloat<f64>),
     Ident(String),
     String(String),
+    /// This variant supports basic numbers and also gives best-effort support for
+    /// difficult edge cases like f64::INFINITY and custom Debug implementations (which
+    /// work as long as they don't include whitespace or a number of special characters
+    /// (":", ",", etc)).
+    UnquotedRawString(String),
 }
 
 impl fmt::Debug for Term {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Term::I128(v) => fmt::Debug::fmt(v, f),
-            Term::U128(v) => fmt::Debug::fmt(v, f),
-            Term::F64(v) => fmt::Debug::fmt(&v.0, f),
             // Idents are displayed without surrounding quotation marks.
             Term::Ident(v) => fmt::Display::fmt(v, f),
             Term::String(v) => fmt::Debug::fmt(v, f),
+            // Raw strings are displayed without surrounding quotation marks.
+            Term::UnquotedRawString(v) => fmt::Display::fmt(v, f),
         }
     }
 }
@@ -101,32 +100,12 @@ impl fmt::Debug for Term {
 impl Term {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        // If input parses as a double, we need to check if it would be parsable as
-        // an integer first. We don't want to parse "0" as a f64.
-        //
-        // But we also don't want to parse "12.2" as "12" because there's more
-        // information consumed when we parse it as a double.
-        if let Ok((rest, v)) = double::<_, ()>(input) {
-            if let Ok((other_rest, other_v)) = i128::<_, ()>(input) {
-                if other_rest.len() <= rest.len() {
-                    return Ok((other_rest, Term::I128(other_v)));
-                }
-            }
-
-            if let Ok((other_rest, other_v)) = u128::<_, ()>(input) {
-                if other_rest.len() <= rest.len() {
-                    return Ok((other_rest, Term::U128(other_v)));
-                }
-            }
-
-            return Ok((rest, Term::F64(OrderedFloat(v))));
-        }
-
         alt((
-            map(i128, Term::I128),
-            map(u128, Term::U128),
             map(parse_ident, Term::Ident),
             map(parse_string, Term::String),
+            map(many1(none_of(":, {}[]()")), |c| {
+                Term::UnquotedRawString(c.into_iter().collect())
+            }),
         ))(input)
     }
 }
@@ -348,9 +327,8 @@ mod tests {
         assert_same_debug(&u128::MAX);
         assert_same_debug(&i128::MAX);
         assert_same_debug(&i128::MIN);
-        // Not supported.
-        // assert_same_debug(&f64::NEG_INFINITY);
-        // assert_same_debug(&f64::INFINITY);
+        assert_same_debug(&f64::NEG_INFINITY);
+        assert_same_debug(&f64::INFINITY);
     }
 
     #[test]
@@ -539,6 +517,26 @@ mod tests {
             let mut map = HashMap::new();
             map.insert("2022-10-5", "foo");
             map.insert("2019-4-12", "foo");
+            map
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn hashmap_with_unquoted_string_keys() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct RawString(&'static str);
+
+        impl fmt::Debug for RawString {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        let item = {
+            let mut map = HashMap::new();
+            map.insert(RawString("2022-10-5"), "foo");
+            map.insert(RawString("2019-4-12"), "foo");
             map
         };
         assert_same_debug(&item);
