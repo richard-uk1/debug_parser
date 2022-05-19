@@ -11,10 +11,7 @@ use nom::{
 };
 use std::fmt;
 
-mod evcxr;
 mod parse_string;
-
-pub use self::evcxr::print_evcxr;
 use self::parse_string::parse_string;
 
 pub fn parse(input: &str) -> anyhow::Result<Value> {
