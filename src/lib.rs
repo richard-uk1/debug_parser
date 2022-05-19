@@ -2,12 +2,13 @@ use anyhow::anyhow;
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{i128, u128},
-    combinator::map,
-    error::{make_error, Error, ErrorKind},
+    character::complete::{alpha1, alphanumeric1, i128, multispace0, u128},
+    combinator::{map, recognize},
+    error::{Error, ParseError},
+    multi::{many0_count, separated_list0},
     number::complete::double,
-    sequence::separated_pair,
-    AsChar, IResult, Parser,
+    sequence::{delimited, pair, separated_pair},
+    IResult, Parser,
 };
 use ordered_float::OrderedFloat;
 use std::fmt;
@@ -138,12 +139,7 @@ pub struct Set {
 impl Set {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        let (input, _) = tag("{")(input)?;
-        // because we're gonna parse everything as a value (in the catch-all) we first need to
-        // separate out at the "}".
-        let (input, rest) =
-            split_on('}', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
-        let values = parse_comma_separated(input)?;
+        let (rest, values) = parse_comma_separated_wrapped(input, "{", "}")?;
         Ok((rest, Set { values }))
     }
 }
@@ -166,13 +162,7 @@ impl Struct {
         let (input, name) = parse_ident(input)?;
 
         let input = consume_ws(input);
-        let (input, _) = tag("{")(input)?;
-        // because we're gonna parse everything as a value (in the catch-all) we first need to
-        // separate out at the "}".
-        let (input, rest) =
-            split_on('}', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
-
-        let values = parse_comma_separated(input)?;
+        let (rest, values) = parse_comma_separated_wrapped(input, "{", "}")?;
         Ok((rest, Self { name, values }))
     }
 }
@@ -196,12 +186,8 @@ pub struct IdentValue {
 impl Parse for IdentValue {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        separated_pair(
-            parse_ident,
-            |s| tag(":")(consume_ws(s)),
-            |s| Value::parse(consume_ws(s)),
-        )(input)
-        .map(|(rest, (ident, value))| (rest, IdentValue { ident, value }))
+        let (rest, (ident, value)) = separated_pair(parse_ident, tag(":"), Value::parse)(input)?;
+        Ok((rest, IdentValue { ident, value }))
     }
 }
 
@@ -213,12 +199,7 @@ pub struct Map {
 impl Map {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        let (input, _) = tag("{")(input)?;
-        // because we're gonna parse everything as a value (in the catch-all) we first need to
-        // separate out at the "}".
-        let (input, rest) =
-            split_on('}', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
-        let values = parse_comma_separated(input)?;
+        let (rest, values) = parse_comma_separated_wrapped(input, "{", "}")?;
         Ok((rest, Self { values }))
     }
 }
@@ -239,12 +220,7 @@ pub struct List {
 impl List {
     fn parse(input: &str) -> IResult<&str, Self> {
         let input = consume_ws(input);
-        let (input, _) = tag("[")(input)?;
-        // because we're gonna parse everything as a value (in the catch-all) we first need to
-        // separate out at the "}".
-        let (input, rest) =
-            split_on(']', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
-        let values = parse_comma_separated(input)?;
+        let (rest, values) = parse_comma_separated_wrapped(input, "[", "]")?;
         Ok((rest, Self { values }))
     }
 }
@@ -269,12 +245,7 @@ impl Tuple {
         } else {
             (input, None)
         };
-        let (input, _) = tag("(")(input)?;
-        // because we're gonna parse everything as a value (in the catch-all) we first need to
-        // separate out at the "}".
-        let (input, rest) =
-            split_on(')', input).ok_or(nom::Err::Error(make_error(input, ErrorKind::Fail)))?;
-        let values = parse_comma_separated(input)?;
+        let (rest, values) = parse_comma_separated_wrapped(input, "(", ")")?;
         Ok((rest, Self { name, values }))
     }
 }
@@ -289,18 +260,6 @@ impl fmt::Debug for Tuple {
     }
 }
 
-fn parse_comma_separated<T: Parse>(mut input: &str) -> Result<Vec<T>, nom::Err<Error<&str>>> {
-    let mut out = vec![];
-    while let Some((v, rest)) = split_on(',', input) {
-        out.push(T::parse(v)?.1);
-        input = rest; // skip ','
-    }
-    if !input.trim_end().is_empty() {
-        out.push(T::parse(input)?.1);
-    }
-    Ok(out)
-}
-
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyValue {
     pub key: Value,
@@ -309,12 +268,8 @@ pub struct KeyValue {
 
 impl Parse for KeyValue {
     fn parse(input: &str) -> IResult<&str, Self> {
-        separated_pair(
-            Value::parse,
-            |s| tag(":")(consume_ws(s)),
-            |s| Value::parse(consume_ws(s)),
-        )(input)
-        .map(|(rest, (key, value))| (rest, KeyValue { key, value }))
+        separated_pair(ws(Value::parse), ws(tag(":")), ws(Value::parse))(input)
+            .map(|(rest, (key, value))| (rest, KeyValue { key, value }))
     }
 }
 
@@ -326,64 +281,13 @@ impl fmt::Debug for KeyValue {
     }
 }
 
-/// parses an ident from a complete input.
 fn parse_ident(input: &str) -> IResult<&str, String> {
-    let mut chrs = input.char_indices().peekable();
-    match chrs.next() {
-        Some((_, ch)) if ch.is_alpha() || ch == '_' => (),
-        _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Alpha))),
-    }
-    while matches!(chrs.peek(), Some((_, ch)) if ch.is_alphanumeric() || *ch == '_') {
-        let _ = chrs.next();
-    }
-    match chrs.next() {
-        Some((idx, _)) => Ok((&input[idx..], input[..idx].to_string())),
-        None => Ok(("", input.to_string())),
-    }
-}
-
-/// Finds the next `ch` in the input and splits on it.
-///
-/// This function takes into account both nesting on `([{` and strings with escaping
-fn split_on(split_ch: char, input: &str) -> Option<(&str, &str)> {
-    macro_rules! ret {
-        ($input:expr, $idx:expr) => {
-            return Some((&$input[..$idx], &$input[$idx + split_ch.len()..]))
-        };
-    }
-
-    let mut paren: u32 = 0; // ()
-    let mut bracket: u32 = 0; // []
-    let mut brace: u32 = 0; // {}
-    let mut in_str = None;
-
-    let mut iter = input.char_indices();
-    while let Some((idx, ch)) = iter.next() {
-        if let Some(s_end) = in_str {
-            if ch == s_end {
-                in_str = None;
-            } else if ch == '\\' {
-                // take the next character
-                let _ = iter.next();
-            } // else do nothing
-        } else {
-            if ch == split_ch && (paren | bracket | brace) == 0 {
-                ret!(input, idx);
-            }
-            match ch {
-                '(' => paren += 1,
-                '[' => bracket += 1,
-                '{' => brace += 1,
-                ')' => paren = paren.saturating_sub(1),
-                ']' => bracket = bracket.saturating_sub(1),
-                '}' => brace = brace.saturating_sub(1),
-                '"' => in_str = Some('"'),
-                '\'' => in_str = Some('\''),
-                _ => (),
-            }
-        }
-    }
-    None
+    // https://docs.rs/nom/latest/nom/recipes/index.html#rust-style-identifiers
+    recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0_count(alt((alphanumeric1, tag("_")))),
+    ))(input)
+    .map(|(rest, matched)| (rest, matched.to_string()))
 }
 
 fn consume_ws(input: &str) -> &str {
@@ -396,22 +300,37 @@ fn consume_ws(input: &str) -> &str {
     ""
 }
 
+/// A combinator that takes a parser `inner` and produces a parser that also consumes both leading and
+/// trailing whitespace, returning the output of `inner`.
+fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
+    inner: F,
+) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
+where
+    F: Fn(&'a str) -> IResult<&'a str, O, E>,
+{
+    delimited(multispace0, inner, multispace0)
+}
+
+fn parse_comma_separated<T: Parse>(input: &str) -> Result<(&str, Vec<T>), nom::Err<Error<&str>>> {
+    separated_list0(tag(","), T::parse)(consume_ws(input))
+}
+
+fn parse_comma_separated_wrapped<'a, T: Parse>(
+    input: &'a str,
+    begin_wrap: &'static str,
+    end_wrap: &'static str,
+) -> Result<(&'a str, Vec<T>), nom::Err<Error<&'a str>>> {
+    delimited(
+        ws(tag(begin_wrap)),
+        parse_comma_separated,
+        ws(tag(end_wrap)),
+    )(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_split_on() {
-        assert_eq!(split_on(',', "test,"), Some(("test", "")));
-        assert_eq!(split_on(',', "test"), None);
-        assert_eq!(split_on(')', "())"), Some(("()", "")));
-        assert_eq!(split_on('}', "{}}"), Some(("{}", "")));
-        assert_eq!(split_on(',', r#""str,""#), None);
-        assert_eq!(split_on(',', r#""str","#), Some((r#""str""#, "")));
-        assert_eq!(split_on(')', r#""(")"#), Some((r#""(""#, "")));
-        assert_eq!(split_on(',', "(,),)"), Some(("(,)", ")")));
-    }
+    use std::collections::{HashMap, HashSet};
 
     #[track_caller]
     fn assert_same_debug<T: std::fmt::Debug>(item: &T) {
@@ -472,7 +391,35 @@ mod tests {
     }
 
     #[test]
-    fn object() {
+    fn trivial_set() {
+        let item = {
+            let mut set = HashSet::new();
+            set.insert("foo");
+            set.insert("bar");
+            set
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn set_with_objects() {
+        #[derive(Debug, Hash, PartialEq, Eq)]
+        #[allow(unused)]
+        struct Foo {
+            value: u32,
+        }
+
+        let item = {
+            let mut set = HashSet::new();
+            set.insert(Foo { value: 12 });
+            set.insert(Foo { value: 2 });
+            set
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn just_objects() {
         #[derive(Debug)]
         #[allow(unused)]
         struct Foo {
@@ -489,6 +436,29 @@ mod tests {
         let item = Foo {
             value: 12.2,
             bar: vec![Bar { elo: 200 }, Bar { elo: -12 }],
+        };
+        assert_same_debug(&item);
+
+        let item = Foo {
+            value: 1.0,
+            bar: vec![],
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn hashmap_with_simple_object_values() {
+        #[derive(Debug)]
+        #[allow(unused)]
+        struct Bar {
+            elo: i32,
+        }
+
+        let item = {
+            let mut map = HashMap::new();
+            map.insert("foo", Bar { elo: 200 });
+            map.insert("foo2", Bar { elo: -10 });
+            map
         };
         assert_same_debug(&item);
     }
@@ -558,6 +528,17 @@ mod tests {
                 },
                 "foo2",
             );
+            map
+        };
+        assert_same_debug(&item);
+    }
+
+    #[test]
+    fn hashmap_with_string_keys() {
+        let item = {
+            let mut map = HashMap::new();
+            map.insert("2022-10-5", "foo");
+            map.insert("2019-4-12", "foo");
             map
         };
         assert_same_debug(&item);
