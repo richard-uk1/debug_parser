@@ -462,6 +462,7 @@ mod tests {
     #[test]
     fn trivial_object() {
         #[derive(Debug)]
+        #[allow(unused)]
         struct Foo {
             value: f32,
         }
@@ -473,12 +474,14 @@ mod tests {
     #[test]
     fn object() {
         #[derive(Debug)]
+        #[allow(unused)]
         struct Foo {
             value: f32,
             bar: Vec<Bar>,
         }
 
         #[derive(Debug)]
+        #[allow(unused)]
         struct Bar {
             elo: i32,
         }
@@ -493,12 +496,14 @@ mod tests {
     #[test]
     fn hashmap_with_object_values() {
         #[derive(Debug)]
+        #[allow(unused)]
         struct Foo {
             value: f32,
             bar: Vec<Bar>,
         }
 
         #[derive(Debug)]
+        #[allow(unused)]
         struct Bar {
             elo: i32,
         }
