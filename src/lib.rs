@@ -6,10 +6,7 @@ use nom::{
 };
 use std::fmt;
 
-pub fn print_evcxr<T: fmt::Debug + ?Sized>(val: &T) {
-    let val = format!("{:?}", val);
-    parse(&val).to_evcxr()
-}
+pub mod evcxr;
 
 pub fn parse(input: &str) -> Value {
     // cannot fail
@@ -48,46 +45,12 @@ impl fmt::Display for Value {
 }
 
 impl Value {
-    pub fn to_evcxr(&self) {
-        println!("EVCXR_BEGIN_CONTENT text/html");
-        if let Some(name) = &self.name {
-            println!("<h5>{}</h5>", html_escape::encode_text(&name));
+    fn empty_list() -> Self {
+        Value {
+            name: None,
+            kind: ValueKind::List(List { values: vec![] }),
         }
-        if let Some(value) = self.find_list(1) {
-            // we're gonna assume the list is homogeneous. If it isn't this will draw something
-            // wierd
-            println!("<table>");
-            // inspect first element (look for map)
-            if let Some(Value {
-                name: _name,
-                kind: ValueKind::Map(map),
-            }) = value.as_list().next()
-            {
-                println!("<thead><tr>");
-                // Use the keys as column headings
-                for key in map.values.iter().map(|v| &v.key) {
-                    println!("<th>{}</th>", html_escape::encode_text(&key.to_string()));
-                }
-                println!("</tr><thead>");
-            }
-            for row in value.as_list() {
-                println!("<tr>");
-                for cell in row.as_list() {
-                    println!("<td>{}</td>", html_escape::encode_text(&cell.to_string()));
-                }
-                println!("</tr>");
-            }
-
-            println!("</table>");
-        } else {
-            println!(
-                "<code>{}</code>",
-                html_escape::encode_text(&self.to_string())
-            );
-        }
-        println!("EVCXR_END_CONTENT");
     }
-
     /// Try to get a list from self. If nothing sensible is found, return None.
     ///
     /// The main job of this function is to recurse if the value contains a single element.
